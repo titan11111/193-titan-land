@@ -1,0 +1,1224 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>TITAN LAND</title>
+<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after {
+  margin: 0; padding: 0; box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+  user-select: none; -webkit-user-select: none;
+  touch-action: none;
+}
+html, body {
+  width: 100%; height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: #000;
+}
+body {
+  font-family: 'Press Start 2P', monospace;
+  color: #fcfcfc;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+}
+body::after {
+  content: '';
+  position: fixed; inset: 0;
+  background: repeating-linear-gradient(0deg,
+    transparent, transparent 2px,
+    rgba(0,0,0,0.15) 2px, rgba(0,0,0,0.15) 4px);
+  pointer-events: none; z-index: 9999;
+}
+#stage {
+  flex: 1 1 auto;
+  display: flex; align-items: center; justify-content: center;
+  width: 100%;
+  min-height: 0;
+}
+#wrap { position: relative; }
+canvas {
+  display: block;
+  width: 100%; height: 100%;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  background: #000;
+}
+#controls {
+  flex: 0 0 auto;
+  width: 100%;
+  display: none;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  padding-bottom: calc(10px + env(safe-area-inset-bottom));
+  padding-left: calc(14px + env(safe-area-inset-left));
+  padding-right: calc(14px + env(safe-area-inset-right));
+}
+body.touch #controls { display: flex; }
+#controls .pad { display: flex; gap: 10px; }
+#controls button {
+  font-family: 'Press Start 2P', monospace;
+  background: #1a1a2e;
+  color: #fcfcfc;
+  border: 3px solid #7878f8;
+  box-shadow: 4px 4px 0 #000;
+  font-size: 16px;
+  width: 64px; height: 64px;
+}
+#controls button:active { transform: translate(2px,2px); box-shadow: 2px 2px 0 #000; }
+#cv-a {
+  width: 84px !important; height: 84px !important;
+  background: #e83800 !important;
+  border-color: #fcfcfc !important;
+  font-size: 12px !important;
+}
+</style>
+</head>
+<body>
+<div id="stage"><div id="wrap"><canvas id="game" width="256" height="240"></canvas></div></div>
+<div id="controls">
+  <div class="pad">
+    <button type="button" id="cv-left">&#9664;</button>
+    <button type="button" id="cv-right">&#9654;</button>
+  </div>
+  <button type="button" id="cv-a">JUMP</button>
+</div>
+<script>
+'use strict';
+/* =========================================================
+   TITAN LAND — FC style side-scrolling action (original IP)
+   256x240 logical / integer scale only / all-dot rendering
+   ========================================================= */
+const W = 256, H = 240, TILE = 16;
+const cv = document.getElementById('game');
+const ctx = cv.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+/* ---------- integer-scale fit ---------- */
+const wrap = document.getElementById('wrap');
+const IS_TOUCH = window.matchMedia('(pointer: coarse)').matches;
+if (IS_TOUCH) document.body.classList.add('touch');
+function fit() {
+  const ctrl = document.getElementById('controls');
+  const ch = IS_TOUCH ? ctrl.offsetHeight : 0;
+  const s = Math.max(1, Math.floor(Math.min(window.innerWidth / W, (window.innerHeight - ch) / H)));
+  wrap.style.width = (W * s) + 'px';
+  wrap.style.height = (H * s) + 'px';
+}
+window.addEventListener('resize', fit);
+window.addEventListener('orientationchange', () => setTimeout(fit, 300));
+
+/* ---------- iOS guards ---------- */
+let lastTap = 0;
+document.addEventListener('touchstart', e => {
+  const now = Date.now();
+  if (now - lastTap < 300) e.preventDefault();
+  lastTap = now;
+}, { passive: false });
+document.addEventListener('dblclick', e => e.preventDefault());
+document.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ---------- palette ---------- */
+const PAL = {
+  K:'#000000', W:'#fcfcfc', B:'#0058f8', b:'#3838b8', C:'#00e8d8',
+  Y:'#f8b800', y:'#ac7c00', O:'#f87858', o:'#c84c0c', R:'#e83800',
+  G:'#00a800', g:'#005800', N:'#ac5800', n:'#503000', S:'#888888',
+  s:'#484848', P:'#6844fc', D:'#1a1a2e', d:'#10102a', L:'#0a0a1a'
+};
+
+/* ---------- sprite builder (string map -> offscreen canvas) ---------- */
+function mkSprite(rows, swap) {
+  const c = document.createElement('canvas');
+  c.width = rows[0].length; c.height = rows.length;
+  const g = c.getContext('2d');
+  for (let y = 0; y < rows.length; y++) {
+    for (let x = 0; x < rows[y].length; x++) {
+      let ch = rows[y][x];
+      if (ch === '.') continue;
+      if (swap && swap[ch]) ch = swap[ch];
+      g.fillStyle = PAL[ch] || ch;
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+  return c;
+}
+
+/* ---------- 5x7 bitmap font (8px cell) ---------- */
+const FONT = {
+  '0':[14,17,19,21,25,17,14],'1':[4,12,4,4,4,4,14],'2':[14,17,1,2,4,8,31],
+  '3':[31,2,4,2,1,17,14],'4':[2,6,10,18,31,2,2],'5':[31,16,30,1,1,17,14],
+  '6':[6,8,16,30,17,17,14],'7':[31,1,2,4,8,8,8],'8':[14,17,17,14,17,17,14],
+  '9':[14,17,17,15,1,2,12],
+  'A':[14,17,17,31,17,17,17],'B':[30,17,17,30,17,17,30],'C':[14,17,16,16,16,17,14],
+  'D':[28,18,17,17,17,18,28],'E':[31,16,16,30,16,16,31],'F':[31,16,16,30,16,16,16],
+  'G':[14,17,16,23,17,17,15],'H':[17,17,17,31,17,17,17],'I':[14,4,4,4,4,4,14],
+  'J':[7,2,2,2,2,18,12],'K':[17,18,20,24,20,18,17],'L':[16,16,16,16,16,16,31],
+  'M':[17,27,21,21,17,17,17],'N':[17,17,25,21,19,17,17],'O':[14,17,17,17,17,17,14],
+  'P':[30,17,17,30,16,16,16],'Q':[14,17,17,17,21,18,13],'R':[30,17,17,30,20,18,17],
+  'S':[15,16,16,14,1,1,30],'T':[31,4,4,4,4,4,4],'U':[17,17,17,17,17,17,14],
+  'V':[17,17,17,17,17,10,4],'W':[17,17,17,21,21,21,10],'X':[17,17,10,4,10,17,17],
+  'Y':[17,17,10,4,4,4,4],'Z':[31,1,2,4,8,16,31],
+  '-':[0,0,0,14,0,0,0],'!':[4,4,4,4,4,0,4],'.':[0,0,0,0,0,0,4],
+  'x':[0,17,10,4,10,17,0],'?':[14,17,1,2,4,0,4],'/':[1,1,2,4,8,16,16],
+  '(':[2,4,8,8,8,4,2],')':[8,4,2,2,2,4,8],':':[0,4,0,0,0,4,0],' ':[0,0,0,0,0,0,0]
+};
+const glyphCache = {};
+function glyph(ch, color) {
+  const key = ch + color;
+  if (glyphCache[key]) return glyphCache[key];
+  const rows = FONT[ch] || FONT[' '];
+  const c = document.createElement('canvas');
+  c.width = 8; c.height = 8;
+  const g = c.getContext('2d');
+  g.fillStyle = color;
+  for (let y = 0; y < 7; y++)
+    for (let x = 0; x < 5; x++)
+      if (rows[y] & (16 >> x)) g.fillRect(x + 1, y, 1, 1);
+  glyphCache[key] = c;
+  return c;
+}
+function text(str, x, y, color) {
+  x = x | 0; y = y | 0;
+  for (let i = 0; i < str.length; i++)
+    ctx.drawImage(glyph(str[i], color || PAL.W), x + i * 8, y);
+}
+function textC(str, y, color) { text(str, (W - str.length * 8) >> 1, y, color); }
+
+/* ---------- title logo (chunky 2x2-dot letters, prebuilt) ---------- */
+function mkLogo(str, color, block) {
+  const c = document.createElement('canvas');
+  c.width = str.length * 6 * block; c.height = 7 * block;
+  const g = c.getContext('2d');
+  g.fillStyle = color;
+  for (let i = 0; i < str.length; i++) {
+    const rows = FONT[str[i]] || FONT[' '];
+    for (let y = 0; y < 7; y++)
+      for (let x = 0; x < 5; x++)
+        if (rows[y] & (16 >> x)) g.fillRect((i * 6 + x) * block, y * block, block, block);
+  }
+  return c;
+}
+const LOGO1 = mkLogo('TITAN', PAL.Y, 3);
+const LOGO2 = mkLogo('LAND', PAL.W, 3);
+
+/* ---------- player sprites ---------- */
+const TITO_BODY = [
+'......KKKK......',
+'.....KCCCCK.....',
+'....KCBBBBCK....',
+'...KCBBBBBBCK...',
+'...KBWWBBWWBK...',
+'...KBWKBBWKBK...',
+'...KBBBBBBBBK...',
+'...KCBBKKBBCK...',
+'....KBBBBBBK....',
+'..KKKBBBBBBKKK..',
+'.KCBBKBBBBKBBCK.',
+'.KKK.KBBBBK.KKK.',
+'.....KBBBBK.....'
+];
+const TITO_LEGS = {
+  idle: ['....KBBKKBBK....','....KBK..KBK....','....KKK..KKK....'],
+  run:  ['.....KBBBBK.....','......KBBK......','......KKKK......'],
+  jump: ['....KBBKKBBK....','...KBBK..KBBK...','...KKK....KKK...']
+};
+function mkTito(legs, swap) { return mkSprite(TITO_BODY.concat(TITO_LEGS[legs]), swap); }
+const GOLD = { C:'Y' };
+const SPR_TITO = {
+  idle: mkTito('idle'), run: mkTito('run'), jump: mkTito('jump'),
+  idleG: mkTito('idle', GOLD), runG: mkTito('run', GOLD), jumpG: mkTito('jump', GOLD)
+};
+
+/* ---------- enemy sprites ---------- */
+const DOTEKO_BODY = [
+'.....KKKKKK.....',
+'...KKSSSSSSKK...',
+'..KSSSSSSSSSSK..',
+'.KSSSWWSSWWSSSK.',
+'.KSSSWKSSWKSSSK.',
+'KSSSSSSSSSSSSSSK',
+'KSSsSSSSSSSSsSSK',
+'KSSSSSSSSSSSSSSK',
+'KSsSSSSssSSSSsSK',
+'.KSSSSSSSSSSSSK.',
+'.KsSSSSSSSSSSsK.',
+'..KSSSSSSSSSSK..',
+'...KKSSSSSSKK...'
+];
+const SPR_DOTEKO = [
+  mkSprite(DOTEKO_BODY.concat(['....KKKKKKKK....','..KKnnK..KnnKK..','..KKKKK..KKKKK..'])),
+  mkSprite(DOTEKO_BODY.concat(['....KKKKKKKK....','....KnnKKnnK....','....KKKKKKKK....']))
+];
+const SPR_DOTEKO_SQ = mkSprite([
+'................','................','................','................',
+'................','................','................','................',
+'................','................',
+'...KKKKKKKKKK...',
+'..KSSSSSSSSSSK..',
+'.KSSWKSSSSWKSSK.',
+'KSSSSSSSSSSSSSSK',
+'.KKKKKKKKKKKKKK.',
+'................'
+]);
+const HARI_A = [
+'.......KK.......',
+'.......KK.......',
+'..KK...KK...KK..',
+'...KK..KK..KK...',
+'....KKssssKK....',
+'...KssssssssK...',
+'.KKssRRssRRssKK.',
+'KKsssRRssRRsssKK',
+'KKssssssssssssKK',
+'.KKssssssssssKK.',
+'..KKssssssssKK..',
+'...KKssssssKK...',
+'..KK..KKKK..KK..',
+'..K....KK....K..',
+'.......KK.......',
+'................'
+];
+const HARI_B = [
+'.......KK.......',
+'...K...KK...K...',
+'...KK..KK..KK...',
+'..KK...KK...KK..',
+'....KKssssKK....',
+'...KssssssssK...',
+'.KKssRRssRRssKK.',
+'KKsssRRssRRsssKK',
+'KKssssssssssssKK',
+'.KKssssssssssKK.',
+'..KKssssssssKK..',
+'...KKssssssKK...',
+'..K...KKKK...K..',
+'..KK...KK...KK..',
+'.......KK.......',
+'................'
+];
+const SPR_HARI = [mkSprite(HARI_A), mkSprite(HARI_B)];
+
+/* ---------- item sprites ---------- */
+const GEM_A = [
+'................','................',
+'.....KKKKKK.....',
+'....KYWWYYYK....',
+'...KYWYYYYYYK...',
+'...KYYYYYYYYK...',
+'...KYYYYYYyYK...',
+'....KYYYYyYK....',
+'.....KYYyYK.....',
+'......KYyK......',
+'.......KK.......',
+'................','................','................','................','................'
+];
+const GEM_B = [
+'................','................',
+'.....KKKKKK.....',
+'....KYYYYWYK....',
+'...KYYYYYWWYK...',
+'...KYYYYYYYYK...',
+'...KYyYYYYYYK...',
+'....KYyYYYYK....',
+'.....KYyYYK.....',
+'......KYyK......',
+'.......KK.......',
+'................','................','................','................','................'
+];
+const SPR_GEM = [mkSprite(GEM_A), mkSprite(GEM_B)];
+const SPR_CORE = mkSprite([
+'................','................',
+'.....KKKKKK.....',
+'....KCCCCCCK....',
+'...KCCWWWWCCK...',
+'...KCWWWWWWCK...',
+'...KCWWWWWWCK...',
+'...KCCWWWWCCK...',
+'....KCCCCCCK....',
+'.....KKKKKK.....',
+'......KBBK......',
+'.....KBBBBK.....',
+'................','................','................','................'
+]);
+
+/* ---------- tiles (programmatic, per theme) ---------- */
+function mkTile(paint) {
+  const c = document.createElement('canvas');
+  c.width = TILE; c.height = TILE;
+  paint(c.getContext('2d'));
+  return c;
+}
+function rect(g, color, x, y, w, h) { g.fillStyle = PAL[color]; g.fillRect(x, y, w, h); }
+function buildTiles(theme) {
+  const day = theme === 0;
+  const top1 = day ? 'G' : 'C', top2 = day ? 'g' : 'b';
+  const dirt = day ? 'N' : 'D', dirtD = day ? 'n' : 'd';
+  const T = {};
+  T.groundTop = mkTile(g => {
+    rect(g, dirt, 0, 0, 16, 16);
+    rect(g, top1, 0, 0, 16, 4);
+    rect(g, top2, 0, 4, 16, 1);
+    for (let x = 0; x < 16; x += 4) rect(g, top2, x + ((x/4)&1), 3, 2, 1);
+    rect(g, dirtD, 3, 8, 2, 2); rect(g, dirtD, 11, 12, 2, 2); rect(g, dirtD, 7, 10, 1, 1);
+  });
+  T.groundFill = mkTile(g => {
+    rect(g, dirt, 0, 0, 16, 16);
+    rect(g, dirtD, 2, 3, 2, 2); rect(g, dirtD, 10, 7, 2, 2);
+    rect(g, dirtD, 5, 12, 2, 2); rect(g, dirtD, 13, 1, 2, 2);
+  });
+  T.brick = mkTile(g => {
+    rect(g, day ? 'o' : 'b', 0, 0, 16, 16);
+    rect(g, 'K', 0, 0, 16, 1); rect(g, 'K', 0, 7, 16, 1); rect(g, 'K', 0, 15, 16, 1);
+    rect(g, 'K', 7, 1, 1, 6); rect(g, 'K', 3, 8, 1, 7); rect(g, 'K', 11, 8, 1, 7);
+    rect(g, day ? 'O' : 'C', 1, 1, 6, 1); rect(g, day ? 'O' : 'C', 8, 1, 7, 1);
+  });
+  T.qblock = mkTile(g => {
+    rect(g, 'Y', 0, 0, 16, 16);
+    rect(g, 'K', 0, 0, 16, 1); rect(g, 'K', 0, 15, 16, 1);
+    rect(g, 'K', 0, 0, 1, 16); rect(g, 'K', 15, 0, 1, 16);
+    rect(g, 'y', 1, 14, 14, 1); rect(g, 'y', 14, 1, 1, 14);
+    rect(g, 'W', 1, 1, 14, 1); rect(g, 'W', 1, 1, 1, 13);
+    rect(g, 'K', 2, 2, 2, 2); rect(g, 'K', 12, 2, 2, 2);
+    rect(g, 'K', 2, 12, 2, 2); rect(g, 'K', 12, 12, 2, 2);
+    const rows = FONT['?'];
+    g.fillStyle = PAL.n;
+    for (let y = 0; y < 7; y++)
+      for (let x = 0; x < 5; x++)
+        if (rows[y] & (16 >> x)) g.fillRect(x + 6, y + 4, 1, 1);
+  });
+  T.used = mkTile(g => {
+    rect(g, 'S', 0, 0, 16, 16);
+    rect(g, 'K', 0, 0, 16, 1); rect(g, 'K', 0, 15, 16, 1);
+    rect(g, 'K', 0, 0, 1, 16); rect(g, 'K', 15, 0, 1, 16);
+    rect(g, 's', 1, 14, 14, 1); rect(g, 's', 14, 1, 1, 14);
+    rect(g, 'K', 2, 2, 2, 2); rect(g, 'K', 12, 2, 2, 2);
+    rect(g, 'K', 2, 12, 2, 2); rect(g, 'K', 12, 12, 2, 2);
+  });
+  T.stone = mkTile(g => {
+    rect(g, 'S', 0, 0, 16, 16);
+    rect(g, 'W', 0, 0, 16, 1); rect(g, 'W', 0, 0, 1, 16);
+    rect(g, 's', 0, 15, 16, 1); rect(g, 's', 15, 0, 1, 16);
+    rect(g, 'K', 15, 15, 1, 1); rect(g, 's', 7, 7, 3, 3);
+  });
+  T.towerBody = mkTile(g => {
+    rect(g, 'D', 0, 0, 16, 16);
+    rect(g, 'K', 0, 0, 2, 16); rect(g, 'K', 14, 0, 2, 16);
+    rect(g, 'b', 2, 0, 1, 16); rect(g, 'b', 13, 0, 1, 16);
+    rect(g, 'S', 4, 3, 2, 2); rect(g, 'S', 10, 3, 2, 2);
+    rect(g, 'S', 4, 11, 2, 2); rect(g, 'S', 10, 11, 2, 2);
+  });
+  T.beacon = [
+    mkTile(g => {
+      rect(g, 'K', 2, 12, 12, 4); rect(g, 'D', 3, 13, 10, 3);
+      rect(g, 'K', 5, 2, 6, 10); rect(g, 'Y', 6, 3, 4, 8); rect(g, 'W', 7, 4, 2, 3);
+      rect(g, 'K', 7, 0, 2, 2);
+    }),
+    mkTile(g => {
+      rect(g, 'K', 2, 12, 12, 4); rect(g, 'D', 3, 13, 10, 3);
+      rect(g, 'K', 5, 2, 6, 10); rect(g, 'W', 6, 3, 4, 8); rect(g, 'Y', 7, 4, 2, 3);
+      rect(g, 'K', 7, 0, 2, 2);
+    })
+  ];
+  return T;
+}
+const TILESETS = [buildTiles(0), buildTiles(1)];
+
+/* ---------- background sprites ---------- */
+const SPR_CLOUD = (() => {
+  const c = document.createElement('canvas');
+  c.width = 32; c.height = 12;
+  const g = c.getContext('2d');
+  g.fillStyle = PAL.W;
+  const rows = [[10,6,12],[6,4,20],[3,2,26],[1,0,30],[0,0,32],[0,0,32],[1,0,30],[4,2,24]];
+  for (let i = 0; i < rows.length; i++) g.fillRect(rows[i][1], i + 2, rows[i][2], 1);
+  return c;
+})();
+
+/* ---------- levels ---------- */
+const THEMES = [
+  { sky:'#3cbcfc', hill:'G', night:false },
+  { sky:'#0a0a2a', hill:'D', night:true }
+];
+function makeLevel(widthTiles) {
+  const map = [];
+  for (let y = 0; y < 15; y++) map.push(new Uint8Array(widthTiles));
+  return map;
+}
+/* tile ids: 0 empty / 1 groundTop / 2 groundFill / 3 brick / 4 qblock-gem
+   5 qblock-pow / 6 used / 7 stone / 8 towerBody / 9 beacon */
+const SOLID = [1,2,3,4,5,6,7];
+function buildLevelData(def) {
+  const map = makeLevel(def.w);
+  const enemies = [], items = [];
+  let towerX = 0;
+  const set = (x, y, t) => { if (x >= 0 && x < def.w && y >= 0 && y < 15) map[y][x] = t; };
+  for (const op of def.ops) {
+    const [k, a, b, c] = op;
+    if (k === 'g') { // ground a..b
+      for (let x = a; x <= b; x++) { set(x, 13, 1); set(x, 14, 2); }
+    } else if (k === 'brk') { for (let i = 0; i < (c || 1); i++) set(a + i, b, 3); }
+    else if (k === 'q') set(a, b, c === 'pow' ? 5 : 4);
+    else if (k === 'st') { // stone stairs at a, heights ascending list c
+      for (let i = 0; i < c.length; i++)
+        for (let h = 0; h < c[i]; h++) set(a + i, 12 - h, 7);
+    }
+    else if (k === 'blk') { for (let i = 0; i < (c || 1); i++) set(a + i, b, 7); }
+    else if (k === 'gem') { for (let i = 0; i < (c || 1); i++) items.push({ type:'gem', x:(a+i)*TILE, y:b*TILE, live:true, t:0 }); }
+    else if (k === 'en') enemies.push({ type:c, sx:a*TILE, sy:b*TILE });
+    else if (k === 'tower') {
+      towerX = a;
+      for (let y = 6; y <= 12; y++) set(a, y, 8);
+      set(a, 5, 9);
+    }
+  }
+  return { map, enemies, items, towerX, w:def.w, theme:def.theme, time:def.time };
+}
+const LEVEL_DEFS = [
+  { theme:0, w:224, time:300, ops:[
+    ['g',0,63],['g',67,89],['g',94,152],['g',156,223],
+    ['q',16,9,'gem'],
+    ['brk',20,9,2],['q',22,9,'pow'],['brk',23,9,2],
+    ['gem',30,12,4],
+    ['en',26,12,'d'],['en',44,12,'d'],
+    ['blk',60,9,2],['gem',60,7,2],
+    ['blk',64,10,3],
+    ['en',78,12,'d'],['en',81,12,'d'],
+    ['brk',84,9,1],['q',85,9,'gem'],['brk',86,9,1],
+    ['blk',90,10,4],['gem',90,8,4],
+    ['st',100,0,[1,2,3]],
+    ['en',110,12,'h'],
+    ['gem',116,12,3],
+    ['en',124,12,'d'],
+    ['brk',130,9,2],['q',132,9,'gem'],['brk',133,9,2],
+    ['en',140,12,'d'],['en',142,12,'d'],
+    ['gem',153,8,3],
+    ['en',166,12,'h'],
+    ['q',172,9,'gem'],['q',174,9,'gem'],
+    ['en',182,12,'d'],
+    ['st',196,0,[1,2,3,4,5,6]],
+    ['tower',214]
+  ]},
+  { theme:1, w:200, time:300, ops:[
+    ['g',0,19],['g',23,39],['g',44,79],['g',84,119],['g',125,159],['g',163,199],
+    ['gem',8,12,3],
+    ['en',14,12,'d'],
+    ['blk',20,10,3],
+    ['q',28,9,'gem'],['en',32,12,'h'],
+    ['blk',40,10,4],['gem',40,8,4],
+    ['gem',50,12,6],
+    ['en',58,12,'h'],['en',66,12,'d'],['en',70,12,'d'],
+    ['brk',73,9,3],
+    ['blk',80,10,4],
+    ['brk',90,9,3],['q',93,9,'pow'],['brk',94,9,3],
+    ['en',100,12,'d'],['en',104,12,'h'],
+    ['st',110,0,[1,2,3]],
+    ['gem',114,7,3],
+    ['blk',120,10,5],['gem',121,8,3],
+    ['en',130,12,'h'],
+    ['gem',136,12,4],
+    ['en',144,12,'d'],['en',147,12,'d'],['en',150,12,'d'],
+    ['gem',160,8,3],
+    ['q',168,9,'gem'],['q',170,9,'gem'],
+    ['en',176,12,'h'],
+    ['st',182,0,[1,2,3,4,5]],
+    ['tower',192]
+  ]}
+];
+const LEVELS = LEVEL_DEFS.map(buildLevelData);
+
+/* ---------- audio ---------- */
+let actx = null;
+function getCtx() {
+  if (!actx) actx = new (window.AudioContext || window.webkitAudioContext)();
+  return actx;
+}
+function unlockAudio() {
+  const c = getCtx();
+  if (c.state === 'suspended') c.resume();
+}
+document.addEventListener('pointerdown', unlockAudio, { once: true });
+document.addEventListener('keydown', unlockAudio, { once: true });
+
+let noiseBuf = null;
+function getNoise() {
+  const c = getCtx();
+  if (!noiseBuf) {
+    noiseBuf = c.createBuffer(1, c.sampleRate * 0.2, c.sampleRate);
+    const d = noiseBuf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  }
+  return noiseBuf;
+}
+function tone(type, f0, f1, t, dur, vol) {
+  const c = getCtx(); if (c.state !== 'running') return;
+  const o = c.createOscillator(), g = c.createGain();
+  o.type = type; o.frequency.setValueAtTime(f0, t);
+  if (f1 !== f0) o.frequency.linearRampToValueAtTime(f1, t + dur);
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(c.destination);
+  o.start(t); o.stop(t + dur + 0.02);
+}
+function noise(t, dur, vol, hp) {
+  const c = getCtx(); if (c.state !== 'running') return;
+  const s = c.createBufferSource(); s.buffer = getNoise();
+  const g = c.createGain();
+  g.gain.setValueAtTime(vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  const f = c.createBiquadFilter();
+  f.type = hp ? 'highpass' : 'lowpass';
+  f.frequency.value = hp ? 4000 : 900;
+  s.connect(f); f.connect(g); g.connect(c.destination);
+  s.start(t); s.stop(t + dur + 0.02);
+}
+function now() { return getCtx().currentTime; }
+const SFX = {
+  jump()  { tone('square', 320, 760, now(), 0.16, 0.14); },
+  stomp() { noise(now(), 0.1, 0.25); tone('square', 220, 70, now(), 0.12, 0.12); },
+  gem()   { tone('square', 988, 988, now(), 0.06, 0.12); tone('square', 1319, 1319, now() + 0.06, 0.12, 0.12); },
+  pow()   { [523,659,784,1047].forEach((f,i) => tone('square', f, f, now() + i*0.07, 0.09, 0.13)); },
+  oneup() { [659,784,1319,1047,1175,1568].forEach((f,i) => tone('square', f, f, now() + i*0.08, 0.1, 0.12)); },
+  hurt()  { tone('square', 400, 90, now(), 0.3, 0.14); },
+  brick() { noise(now(), 0.12, 0.22); },
+  bump()  { tone('square', 110, 90, now(), 0.08, 0.12); },
+  clearJ(){ [523,659,784,1047,784,1047,1319].forEach((f,i) => tone('square', f, f, now() + i*0.11, 0.14, 0.13)); },
+  deathJ(){ [494,466,440,415,392,330,262].forEach((f,i) => tone('square', f, f, now() + i*0.1, 0.12, 0.13)); },
+  overJ() { [262,247,220,196,165,131].forEach((f,i) => tone('triangle', f, f, now() + i*0.22, 0.26, 0.16)); }
+};
+
+/* BGM: 32-step sequencer, square lead + triangle bass + noise drums */
+const mf = n => n ? 440 * Math.pow(2, (n - 69) / 12) : 0;
+const BGM_TRACKS = [
+  { tempo: 138,
+    mel:  [72,0,79,0, 76,0,72,0, 74,76,74,0, 71,0,67,0, 72,0,79,0, 81,0,79,0, 76,0,74,72, 74,0,0,0],
+    bass: [48,0,48,0, 43,0,43,0, 45,0,45,0, 43,0,43,0, 48,0,48,0, 41,0,41,0, 43,0,43,0, 43,0,45,47] },
+  { tempo: 126,
+    mel:  [69,0,72,0, 76,0,72,0, 71,0,68,0, 64,0,68,0, 69,0,72,0, 77,0,76,0, 72,0,71,0, 69,0,0,0],
+    bass: [45,0,45,0, 40,0,40,0, 41,0,41,0, 40,0,40,0, 45,0,45,0, 38,0,38,0, 40,0,40,0, 45,0,0,0] }
+];
+let bgm = { track: null, step: 0, nextT: 0 };
+function bgmStart(i) { bgm.track = BGM_TRACKS[i]; bgm.step = 0; bgm.nextT = 0; }
+function bgmStop() { bgm.track = null; }
+function bgmTick() {
+  if (!bgm.track || !actx || actx.state !== 'running') return;
+  const spb = 60 / bgm.track.tempo / 4;
+  if (bgm.nextT === 0) bgm.nextT = now() + 0.05;
+  while (bgm.nextT < now() + 0.12) {
+    const t = bgm.nextT, s = bgm.step;
+    const m = bgm.track.mel[s], b = bgm.track.bass[s];
+    if (m) tone('square', mf(m), mf(m), t, spb * 0.9, 0.055);
+    if (b) tone('triangle', mf(b), mf(b), t, spb * 1.7, 0.1);
+    if (s % 4 === 0) noise(t, 0.06, 0.1);
+    if (s % 4 === 2) noise(t, 0.03, 0.05, true);
+    bgm.nextT += spb;
+    bgm.step = (bgm.step + 1) % 32;
+  }
+}
+
+/* ---------- input ---------- */
+const K = {};
+let anyPress = false;
+document.addEventListener('keydown', e => {
+  if (['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','Space'].includes(e.code)) e.preventDefault();
+  if (!K[e.code]) anyPress = true;
+  K[e.code] = true;
+  if (e.code === 'KeyP') togglePause();
+});
+document.addEventListener('keyup', e => { K[e.code] = false; });
+function bindPointer(el, codes) {
+  el.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    try { el.setPointerCapture(e.pointerId); } catch (err) {}
+    codes.forEach(c => { if (!K[c]) anyPress = true; K[c] = true; });
+    unlockAudio();
+  });
+  const off = () => codes.forEach(c => { K[c] = false; });
+  el.addEventListener('pointerup', off);
+  el.addEventListener('pointercancel', off);
+}
+bindPointer(document.getElementById('cv-left'), ['ArrowLeft']);
+bindPointer(document.getElementById('cv-right'), ['ArrowRight']);
+bindPointer(document.getElementById('cv-a'), ['Space']);
+cv.addEventListener('pointerdown', e => { e.preventDefault(); anyPress = true; unlockAudio(); });
+
+/* ---------- game state ---------- */
+const ST = { TITLE:0, READY:1, PLAY:2, DEAD:3, GAMEOVER:4, CLEAR:5, WIN:6, PAUSE:7 };
+let state = ST.TITLE;
+let stateT = 0;
+let levelIdx = 0;
+let level = null;
+let score = 0, gems = 0, lives = 3, timeLeft = 300;
+let timeFrames = 0;
+let camX = 0;
+let frame = 0;
+let clearBonus = 0;
+
+const player = {
+  x:0, y:0, vx:0, vy:0, w:12, h:15,
+  onGround:false, face:1, shield:false, inv:0,
+  coyote:0, jbuf:0, jumping:false, anim:0
+};
+let enemies = [], items = [], particles = [], bounces = [];
+
+function resetLevel() {
+  level = LEVELS[levelIdx];
+  player.x = 32; player.y = 12 * TILE; player.vx = 0; player.vy = 0;
+  player.onGround = false; player.face = 1; player.inv = 0;
+  player.jumping = false; player.coyote = 0; player.jbuf = 0;
+  camX = 0;
+  timeLeft = level.time; timeFrames = 0;
+  enemies = level.enemies.map(e => ({
+    type:e.type, x:e.sx, y:e.sy, vx:e.type === 'h' ? -0.5 : -0.4, vy:0,
+    w:14, h:e.type === 'h' ? 14 : 16, live:true, active:false, squash:0, anim:0
+  }));
+  items = level.items.map(i => ({ ...i, live:true, t:0, vx:0, vy:0, solidCheck:false }));
+  particles = []; bounces = [];
+}
+function fullResetLevels() {
+  // rebuild all level maps from scratch (restore bricks / qblocks)
+  for (let i = 0; i < LEVEL_DEFS.length; i++) LEVELS[i] = buildLevelData(LEVEL_DEFS[i]);
+}
+
+/* ---------- tile helpers ---------- */
+function tileAt(px, py) {
+  const tx = Math.floor(px / TILE), ty = Math.floor(py / TILE);
+  if (tx < 0 || tx >= level.w) return 7; // walls at level edges
+  if (ty < 0) return 0;
+  if (ty > 14) return 0;
+  return level.map[ty][tx];
+}
+function isSolid(t) { return SOLID.includes(t); }
+function setTile(px, py, t) {
+  const tx = Math.floor(px / TILE), ty = Math.floor(py / TILE);
+  if (tx >= 0 && tx < level.w && ty >= 0 && ty < 15) level.map[ty][tx] = t;
+}
+
+/* ---------- entity physics ---------- */
+function moveEntity(e) {
+  // horizontal
+  e.x += e.vx;
+  if (e.vx > 0) {
+    if (isSolid(tileAt(e.x + e.w, e.y + 1)) || isSolid(tileAt(e.x + e.w, e.y + e.h - 1))) {
+      e.x = Math.floor((e.x + e.w) / TILE) * TILE - e.w - 0.01;
+      e.hitWall = true;
+    } else e.hitWall = false;
+  } else if (e.vx < 0) {
+    if (isSolid(tileAt(e.x, e.y + 1)) || isSolid(tileAt(e.x, e.y + e.h - 1))) {
+      e.x = (Math.floor(e.x / TILE) + 1) * TILE + 0.01;
+      e.hitWall = true;
+    } else e.hitWall = false;
+  }
+  // vertical
+  e.y += e.vy;
+  e.onGround = false;
+  if (e.vy >= 0) {
+    if (isSolid(tileAt(e.x + 1, e.y + e.h)) || isSolid(tileAt(e.x + e.w - 1, e.y + e.h))) {
+      e.y = Math.floor((e.y + e.h) / TILE) * TILE - e.h;
+      e.vy = 0; e.onGround = true;
+    }
+  } else {
+    if (isSolid(tileAt(e.x + 1, e.y)) || isSolid(tileAt(e.x + e.w - 1, e.y))) {
+      e.y = (Math.floor(e.y / TILE) + 1) * TILE;
+      e.vy = 0;
+      return true; // head bump
+    }
+  }
+  return false;
+}
+function overlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+/* ---------- gameplay events ---------- */
+function addScore(n) { score += n; }
+function collectGem() {
+  gems++;
+  addScore(100);
+  SFX.gem();
+  if (gems >= 100) { gems -= 100; lives++; SFX.oneup(); }
+}
+function hitBlockAbove(px, py) {
+  const t = tileAt(px, py);
+  const tx = Math.floor(px / TILE), ty = Math.floor(py / TILE);
+  if (t === 3) { // brick: break
+    setTile(px, py, 0);
+    addScore(50);
+    SFX.brick();
+    for (let i = 0; i < 4; i++) {
+      particles.push({
+        x: tx * TILE + 4 + (i % 2) * 6, y: ty * TILE + 4,
+        vx: (i % 2 ? 1.2 : -1.2), vy: -2.5 - (i > 1 ? 1 : 0),
+        t: 0, color: level.theme === 0 ? PAL.o : PAL.b
+      });
+    }
+  } else if (t === 4 || t === 5) { // q block
+    setTile(px, py, 6);
+    bounces.push({ tx, ty, t: 0 });
+    if (t === 4) {
+      items.push({ type:'gempop', x:tx*TILE, y:(ty-1)*TILE, live:true, t:0 });
+      collectGem();
+    } else {
+      items.push({ type:'core', x:tx*TILE, y:(ty-1)*TILE, live:true, t:0, vx:0.6, vy:0, rise:16 });
+      SFX.pow();
+    }
+  } else if (isSolid(t)) {
+    SFX.bump();
+  }
+}
+function playerHurt() {
+  if (player.inv > 0) return;
+  if (player.shield) {
+    player.shield = false;
+    player.inv = 90;
+    SFX.hurt();
+  } else {
+    startDeath();
+  }
+}
+function startDeath() {
+  state = ST.DEAD; stateT = 0;
+  player.vy = -4.5; player.vx = 0;
+  bgmStop();
+  SFX.deathJ();
+}
+function startClear() {
+  state = ST.CLEAR; stateT = 0;
+  bgmStop();
+  SFX.clearJ();
+  // height bonus: higher touch = more
+  const rel = Math.max(0, 12 * TILE - player.y);
+  clearBonus = Math.min(2000, 200 + Math.floor(rel / TILE) * 300);
+  addScore(clearBonus);
+  addScore(timeLeft * 10);
+}
+
+/* ---------- update ---------- */
+function updatePlay() {
+  // timer
+  if (++timeFrames >= 60) {
+    timeFrames = 0;
+    if (--timeLeft <= 0) { timeLeft = 0; startDeath(); return; }
+  }
+  // input
+  const left = K.ArrowLeft, right = K.ArrowRight;
+  const jump = K.Space || K.KeyZ || K.ArrowUp;
+  const ACC = 0.08, MAX = 2.0, FRIC = 0.9;
+  if (left && !right) { player.vx -= ACC * (player.onGround ? 1 : 0.7); player.face = -1; }
+  else if (right && !left) { player.vx += ACC * (player.onGround ? 1 : 0.7); player.face = 1; }
+  else player.vx *= player.onGround ? FRIC : 0.98;
+  if (Math.abs(player.vx) < 0.05) player.vx = 0;
+  player.vx = Math.max(-MAX, Math.min(MAX, player.vx));
+
+  // jump: coyote + buffer + variable height
+  if (player.onGround) player.coyote = 6; else if (player.coyote > 0) player.coyote--;
+  if (jump && !player.jheld) player.jbuf = 6; else if (player.jbuf > 0) player.jbuf--;
+  player.jheld = jump;
+  if (player.jbuf > 0 && player.coyote > 0) {
+    player.vy = -5.0; player.jumping = true;
+    player.coyote = 0; player.jbuf = 0;
+    SFX.jump();
+  }
+  const grav = (player.jumping && jump && player.vy < 0) ? 0.12 : 0.22;
+  player.vy = Math.min(6, player.vy + grav);
+  if (player.vy >= 0) player.jumping = false;
+
+  const bump = moveEntity(player);
+  if (bump) {
+    // hit the tile above the player's head (choose cell nearer center)
+    const cx = player.x + player.w / 2;
+    hitBlockAbove(cx, player.y - 4);
+    player.jumping = false;
+  }
+  // keep inside camera left edge
+  if (player.x < camX) { player.x = camX; player.vx = 0; }
+
+  if (player.inv > 0) player.inv--;
+  player.anim += Math.abs(player.vx) > 0.2 ? 1 : 0;
+
+  // fell into pit
+  if (player.y > H + 16) { startDeath(); return; }
+
+  // camera
+  const target = player.x - 100;
+  camX = Math.max(camX, Math.min(target, level.w * TILE - W));
+  camX = Math.max(0, camX);
+
+  // enemies
+  for (const e of enemies) {
+    if (!e.live) continue;
+    if (!e.active) {
+      if (e.x < camX + W + 24) e.active = true;
+      else continue;
+    }
+    if (e.squash > 0) { e.squash++; if (e.squash > 30) e.live = false; continue; }
+    e.vy = Math.min(6, e.vy + 0.22);
+    // harigoro: turn at edges (stay on platforms)
+    if (e.type === 'h' && e.onGround) {
+      const aheadX = e.vx > 0 ? e.x + e.w + 2 : e.x - 2;
+      if (!isSolid(tileAt(aheadX, e.y + e.h + 4))) e.vx = -e.vx;
+    }
+    moveEntity(e);
+    if (e.hitWall) e.vx = -e.vx;
+    e.anim++;
+    if (e.y > H + 32) { e.live = false; continue; }
+    // player contact
+    if (player.inv === 0 && state === ST.PLAY && overlap(player, e)) {
+      const stomping = player.vy > 0 && (player.y + player.h) < (e.y + e.h * 0.55);
+      if (stomping && e.type === 'd') {
+        e.squash = 1; e.vx = 0;
+        addScore(200);
+        player.vy = -3.2; player.jumping = false;
+        SFX.stomp();
+      } else {
+        playerHurt();
+        if (state !== ST.PLAY) return;
+      }
+    }
+  }
+
+  // items
+  for (const it of items) {
+    if (!it.live) continue;
+    it.t++;
+    if (it.type === 'gem') {
+      if (overlap(player, { x:it.x+3, y:it.y+2, w:10, h:10 })) { it.live = false; collectGem(); }
+    } else if (it.type === 'gempop') {
+      if (it.t > 24) it.live = false;
+    } else if (it.type === 'core') {
+      if (it.rise > 0) { it.y -= 0.5; it.rise -= 0.5; }
+      else {
+        it.vy = Math.min(4, (it.vy || 0) + 0.15);
+        const ent = { x:it.x+2, y:it.y+2, w:12, h:12, vx:it.vx, vy:it.vy, hitWall:false, onGround:false };
+        moveEntity(ent);
+        it.x = ent.x - 2; it.y = ent.y - 2; it.vy = ent.vy;
+        if (ent.hitWall) it.vx = -it.vx;
+      }
+      if (overlap(player, { x:it.x+2, y:it.y+2, w:12, h:12 })) {
+        it.live = false;
+        player.shield = true;
+        addScore(1000);
+        SFX.pow();
+      }
+      if (it.y > H + 32) it.live = false;
+    }
+  }
+
+  // particles
+  for (const p of particles) {
+    p.t++; p.vy += 0.2; p.x += p.vx; p.y += p.vy;
+  }
+  particles = particles.filter(p => p.t < 90 && p.y < H + 16);
+  for (const b of bounces) b.t++;
+  bounces = bounces.filter(b => b.t < 10);
+
+  // goal
+  const tw = level.towerX * TILE;
+  if (player.x + player.w > tw + 4 && player.x < tw + 12) {
+    startClear();
+  }
+}
+
+/* ---------- draw ---------- */
+function drawBG() {
+  const th = THEMES[level.theme];
+  ctx.fillStyle = th.sky;
+  ctx.fillRect(0, 0, W, H);
+  if (th.night) {
+    // stars (fixed pattern, 0.25x parallax)
+    const off = Math.floor(camX * 0.25);
+    ctx.fillStyle = PAL.W;
+    for (let i = 0; i < 40; i++) {
+      const sx = ((i * 61 + 13) % 512 - (off % 512) + 512) % 512;
+      const sy = (i * 37 + 11) % 130;
+      if (sx < W) {
+        ctx.fillRect(sx, sy, 1, 1);
+        if (i % 7 === 0) { ctx.fillRect(sx - 1, sy, 3, 1); ctx.fillRect(sx, sy - 1, 1, 3); }
+      }
+    }
+  } else {
+    // clouds 0.25x
+    const off = Math.floor(camX * 0.25);
+    for (let i = 0; i < 8; i++) {
+      const sx = ((i * 96 + 20) % 640 - (off % 640) + 640) % 640;
+      const sy = 24 + (i % 3) * 22;
+      if (sx < W + 32) ctx.drawImage(SPR_CLOUD, (sx - 16) | 0, sy);
+    }
+  }
+  // mid hills 0.5x (stepped pyramids, widest at base)
+  const off2 = Math.floor(camX * 0.5);
+  ctx.fillStyle = PAL[th.hill];
+  for (let i = 0; i < 10; i++) {
+    const bx = ((i * 120) % 960 - (off2 % 960) + 960) % 960 - 60;
+    if (bx > W) continue;
+    const hh = 24 + (i % 2) * 16;
+    for (let r = 0; r < hh; r += 4) {
+      ctx.fillRect((bx - r) | 0, (13 * TILE - hh + r) | 0, r * 2 + 8, 4);
+    }
+  }
+}
+function drawTiles() {
+  const T = TILESETS[level.theme];
+  const x0 = Math.floor(camX / TILE), x1 = Math.min(level.w - 1, x0 + 17);
+  for (let ty = 0; ty < 15; ty++) {
+    for (let tx = x0; tx <= x1; tx++) {
+      const t = level.map[ty][tx];
+      if (!t) continue;
+      let dy = 0;
+      for (const b of bounces) if (b.tx === tx && b.ty === ty) dy = -(4 - Math.abs(b.t - 5)) | 0;
+      const dx = (tx * TILE - camX) | 0;
+      const dyp = (ty * TILE + dy) | 0;
+      switch (t) {
+        case 1: ctx.drawImage(T.groundTop, dx, dyp); break;
+        case 2: ctx.drawImage(T.groundFill, dx, dyp); break;
+        case 3: ctx.drawImage(T.brick, dx, dyp); break;
+        case 4: case 5: ctx.drawImage(T.qblock, dx, dyp); break;
+        case 6: ctx.drawImage(T.used, dx, dyp); break;
+        case 7: ctx.drawImage(T.stone, dx, dyp); break;
+        case 8: ctx.drawImage(T.towerBody, dx, dyp); break;
+        case 9: ctx.drawImage(T.beacon[(frame >> 4) & 1], dx, dyp); break;
+      }
+    }
+  }
+}
+function drawEntities() {
+  // items
+  for (const it of items) {
+    if (!it.live) continue;
+    const dx = (it.x - camX) | 0, dy = it.y | 0;
+    if (dx < -16 || dx > W) continue;
+    if (it.type === 'gem') ctx.drawImage(SPR_GEM[(frame >> 4) & 1], dx, dy);
+    else if (it.type === 'gempop') {
+      ctx.drawImage(SPR_GEM[0], dx, (dy - (it.t < 12 ? it.t : 24 - it.t)) | 0);
+    }
+    else if (it.type === 'core') ctx.drawImage(SPR_CORE, dx, dy);
+  }
+  // enemies
+  for (const e of enemies) {
+    if (!e.live) continue;
+    const dx = (e.x - camX - 1) | 0, dy = e.y | 0;
+    if (dx < -20 || dx > W) continue;
+    if (e.type === 'd') {
+      if (e.squash > 0) ctx.drawImage(SPR_DOTEKO_SQ, dx, dy);
+      else ctx.drawImage(SPR_DOTEKO[(e.anim >> 3) & 1], dx, dy);
+    } else {
+      ctx.drawImage(SPR_HARI[(e.anim >> 3) & 1], dx, (dy - 1) | 0);
+    }
+  }
+  // particles (brick chips, 4x4)
+  for (const p of particles) {
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x | 0, p.y | 0, 4, 4);
+  }
+  // player
+  if (state === ST.PLAY || state === ST.DEAD || state === ST.CLEAR || state === ST.READY || state === ST.PAUSE) {
+    if (player.inv > 0 && (frame & 4)) return; // blink
+    let spr;
+    const g = player.shield ? 'G' : '';
+    if (!player.onGround) spr = SPR_TITO['jump' + g];
+    else if (Math.abs(player.vx) > 0.2) spr = SPR_TITO[((player.anim >> 3) & 1 ? 'run' : 'idle') + g];
+    else spr = SPR_TITO['idle' + g];
+    const dx = (player.x - camX - 2) | 0, dy = (player.y - 1) | 0;
+    if (player.face === 1) {
+      ctx.drawImage(spr, dx, dy);
+    } else {
+      ctx.save();
+      ctx.translate(dx + 16, dy);
+      ctx.scale(-1, 1);
+      ctx.drawImage(spr, 0, 0);
+      ctx.restore();
+    }
+  }
+}
+function pad(n, l) { return String(Math.max(0, n | 0)).padStart(l, '0'); }
+function drawHUD() {
+  text('SCORE', 8, 4, PAL.W);
+  text(pad(score, 6), 8, 13, PAL.W);
+  text('GEM', 88, 4, PAL.Y);
+  text('x' + pad(gems, 2), 88, 13, PAL.W);
+  text('WORLD', 136, 4, PAL.W);
+  text('1-' + (levelIdx + 1), 144, 13, PAL.W);
+  text('TIME', 208, 4, PAL.W);
+  text(pad(timeLeft, 3), 212, 13, timeLeft <= 50 ? PAL.R : PAL.W);
+}
+function drawTitle() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  // decorative ground strip
+  const T = TILESETS[0];
+  for (let x = 0; x < W; x += TILE) {
+    ctx.drawImage(T.groundTop, x, 208);
+    ctx.drawImage(T.groundFill, x, 224);
+  }
+  ctx.drawImage(SPR_CLOUD, 24, 40);
+  ctx.drawImage(SPR_CLOUD, 190, 64);
+  // logo panel
+  ctx.fillStyle = PAL.D;
+  ctx.fillRect(28, 56, 200, 76);
+  ctx.fillStyle = PAL.b;
+  ctx.fillRect(28, 56, 200, 2); ctx.fillRect(28, 130, 200, 2);
+  ctx.fillRect(28, 56, 2, 76); ctx.fillRect(226, 56, 2, 76);
+  ctx.drawImage(LOGO1, (W - LOGO1.width) >> 1, 66);
+  ctx.drawImage(LOGO2, (W - LOGO2.width) >> 1, 94);
+  textC('SUPER ACTION', 140, PAL.C);
+  if ((frame >> 4) & 1) textC(IS_TOUCH ? 'TAP TO START' : 'PRESS ANY KEY', 164, PAL.W);
+  ctx.drawImage(SPR_TITO.idle, 120, 192);
+  textC('(C) 2026 TITANS', 230, PAL.S);
+  text('TOP ' + pad(hiScore, 6), 88, 20, PAL.Y);
+}
+let hiScore = 0;
+try { hiScore = parseInt(localStorage.getItem('titanland_hi') || '0', 10) || 0; } catch (e) {}
+function saveHi() {
+  if (score > hiScore) {
+    hiScore = score;
+    try { localStorage.setItem('titanland_hi', String(hiScore)); } catch (e) {}
+  }
+}
+function drawReady() {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  textC('WORLD 1-' + (levelIdx + 1), 96, PAL.W);
+  ctx.drawImage(SPR_TITO.idle, 104, 116);
+  text('x ' + lives, 130, 121, PAL.W);
+}
+function drawOverlayMsg(msg, color) {
+  ctx.fillStyle = 'rgba(0,0,0,0.6)';
+  ctx.fillRect(0, 96, W, 48);
+  textC(msg, 116, color || PAL.W);
+}
+
+/* ---------- pause ---------- */
+function togglePause() {
+  if (state === ST.PLAY) { state = ST.PAUSE; bgmStop(); SFX.bump(); }
+  else if (state === ST.PAUSE) { state = ST.PLAY; bgmStart(level.theme); }
+}
+
+/* ---------- main loop (fixed 60fps step) ---------- */
+let acc = 0, lastT = 0;
+function loop(t) {
+  requestAnimationFrame(loop);
+  if (!lastT) lastT = t;
+  let dt = t - lastT;
+  lastT = t;
+  if (dt > 100) dt = 100;
+  acc += dt;
+  if (acc > 200) acc = 200;
+  let steps = 0;
+  while (acc >= 1000 / 60 && steps < 4) {
+    acc -= 1000 / 60;
+    steps++;
+    step();
+  }
+  render();
+  bgmTick();
+}
+function step() {
+  frame++;
+  stateT++;
+  const consumed = anyPress; anyPress = false;
+  switch (state) {
+    case ST.TITLE:
+      if (consumed && stateT > 20) {
+        score = 0; gems = 0; lives = 3; levelIdx = 0;
+        fullResetLevels();
+        resetLevel();
+        player.shield = false;
+        state = ST.READY; stateT = 0;
+      }
+      break;
+    case ST.READY:
+      if (stateT > 100) { state = ST.PLAY; stateT = 0; bgmStart(level.theme); }
+      break;
+    case ST.PLAY:
+      updatePlay();
+      break;
+    case ST.DEAD:
+      player.vy = Math.min(6, player.vy + 0.18);
+      player.y += player.vy;
+      if (stateT > 150) {
+        lives--;
+        player.shield = false;
+        if (lives <= 0) {
+          state = ST.GAMEOVER; stateT = 0;
+          saveHi();
+          SFX.overJ();
+        } else {
+          fullResetLevels();
+          resetLevel();
+          state = ST.READY; stateT = 0;
+        }
+      }
+      break;
+    case ST.GAMEOVER:
+      if (stateT > 200 || (consumed && stateT > 60)) { state = ST.TITLE; stateT = 0; }
+      break;
+    case ST.CLEAR:
+      if (stateT > 200) {
+        levelIdx++;
+        if (levelIdx >= LEVELS.length) {
+          state = ST.WIN; stateT = 0;
+          saveHi();
+        } else {
+          resetLevel();
+          state = ST.READY; stateT = 0;
+        }
+      }
+      break;
+    case ST.WIN:
+      if (consumed && stateT > 60) { state = ST.TITLE; stateT = 0; }
+      break;
+    case ST.PAUSE:
+      break;
+  }
+}
+function render() {
+  if (state === ST.TITLE) { drawTitle(); return; }
+  if (state === ST.READY) { drawReady(); return; }
+  if (state === ST.GAMEOVER) {
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    textC('GAME OVER', 104, PAL.R);
+    textC('SCORE ' + pad(score, 6), 128, PAL.W);
+    drawHUD();
+    return;
+  }
+  if (state === ST.WIN) {
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+    const T = TILESETS[0];
+    for (let x = 0; x < W; x += TILE) ctx.drawImage(T.groundTop, x, 208);
+    ctx.drawImage(SPR_TITO.idle, 120, 192);
+    textC('THANK YOU!', 80, PAL.Y);
+    textC('TITO REACHED', 104, PAL.W);
+    textC('THE LAST BEACON', 116, PAL.W);
+    textC('SCORE ' + pad(score, 6), 144, PAL.C);
+    if ((frame >> 4) & 1) textC(IS_TOUCH ? 'TAP TO TITLE' : 'PRESS ANY KEY', 176, PAL.W);
+    return;
+  }
+  drawBG();
+  drawTiles();
+  drawEntities();
+  drawHUD();
+  if (state === ST.CLEAR) {
+    drawOverlayMsg('COURSE CLEAR!', PAL.Y);
+    textC('BONUS ' + clearBonus, 132, PAL.W);
+  }
+  if (state === ST.PAUSE) drawOverlayMsg('PAUSE', PAL.C);
+}
+
+/* ---------- debug hook (smoke test only; no gameplay effect) ---------- */
+window.__TL = {
+  get s() { return { state, levelIdx, score, lives, px: player.x, py: player.y }; },
+  tp(x) { player.x = x; player.y = 32; player.vy = 0; camX = Math.max(0, Math.min(x - 100, level.w * TILE - W)); }
+};
+
+/* ---------- boot ---------- */
+resetLevel();
+state = ST.TITLE;
+fit();
+setTimeout(fit, 100);
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
